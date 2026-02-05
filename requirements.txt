@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+lxml
+psycopg[binary]
+python-dotenv
+pandas
+streamlit
