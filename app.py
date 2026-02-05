@@ -1,196 +1,85 @@
-# MFDS 신제품 수집기 (GitHub Actions + Supabase Postgres)
-# - 목록(CCBAE01)에서 '취소/취하일자'가 공란인 항목을 신규로 간주
-# - 상세(getItemDetail)에서 필드 파싱
-# - itemSeq 기준 업서트(누적 저장)
-
 import os
-import re
-import time
-import random
-import hashlib
-from datetime import datetime
-
-import requests
-from bs4 import BeautifulSoup
+import hmac
+import streamlit as st
 import psycopg
+import pandas as pd
 
+# -----------------------------
+# 🔐 접근 비밀번호
+# -----------------------------
+def require_password():
+    pwd = None
+    if "APP_PASSWORD" in st.secrets:
+        pwd = st.secrets["APP_PASSWORD"]
+    else:
+        pwd = os.environ.get("APP_PASSWORD")
 
-LIST_URL = "https://nedrug.mfds.go.kr/pbp/CCBAE01"
-DETAIL_URL = "https://nedrug.mfds.go.kr/pbp/CCBBB01/getItemDetail"
+    if not pwd:
+        return  # 비번 미설정 시 통과
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (MFDS-NewDrug-Tracker/1.0)"}
+    if st.session_state.get("authed"):
+        return
 
+    st.title("MFDS 신제품 트래커")
+    entered = st.text_input("접근 비밀번호", type="password")
 
-def sha256(text: str) -> str:
-    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+    if entered and hmac.compare_digest(entered, pwd):
+        st.session_state["authed"] = True
+        st.rerun()
+    else:
+        st.stop()
 
+require_password()
 
-def get_db_conn():
+# -----------------------------
+# 🗄 DB URL 가져오기
+# -----------------------------
+def get_db_url():
+    if "DATABASE_URL" in st.secrets:
+        return st.secrets["DATABASE_URL"]
+
     db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        raise RuntimeError("DATABASE_URL 환경변수가 설정되지 않았습니다.")
-    return psycopg.connect(db_url)
+    if db_url:
+        return db_url
 
+    st.error("DATABASE_URL이 설정되지 않았습니다 (Streamlit Secrets 확인)")
+    st.stop()
 
-def http_get(url, params=None):
-    r = requests.get(url, params=params, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.text
+DB_URL = get_db_url()
 
+# -----------------------------
+# 📊 DB 연결
+# -----------------------------
+@st.cache_data(ttl=300)
+def load_products():
+    with psycopg.connect(DB_URL) as conn:
+        query = """
+        select
+            p.item_seq,
+            p.product_name,
+            p.company_name,
+            p.rx_otc,
+            p.review_type,
+            p.approval_date,
+            p.first_seen_at,
+            p.last_seen_at
+        from products p
+        order by p.first_seen_at desc
+        limit 500
+        """
+        return pd.read_sql(query, conn)
 
-def parse_list_page(html: str):
-    """
-    CCBAE01 목록 테이블에서 '취소/취하일자'가 비어있는 행만 추출
-    """
-    soup = BeautifulSoup(html, "lxml")
-    table = soup.find("table")
-    if not table:
-        return []
+# -----------------------------
+# 🖥 UI
+# -----------------------------
+st.header("📦 MFDS 신제품 현황")
 
-    rows = table.find_all("tr")
-    out = []
+df = load_products()
 
-    for tr in rows[1:]:
-        tds = tr.find_all("td")
-        if len(tds) < 5:
-            continue
+st.caption(f"총 {len(df)}건")
 
-        a = tds[0].find("a")
-        if not a:
-            continue
-
-        product_name = a.get_text(strip=True)
-
-        href = a.get("href", "")
-        m = re.search(r"itemSeq=(\d+)", href)
-        if not m:
-            onclick = a.get("onclick", "")
-            m = re.search(r"itemSeq=(\d+)", onclick)
-        if not m:
-            continue
-
-        item_seq = m.group(1)
-        company_name = tds[1].get_text(" ", strip=True)
-        rx_otc = tds[2].get_text(" ", strip=True)
-        approval_date = tds[3].get_text(" ", strip=True)
-
-        cancel_withdraw = tds[4].get_text(" ", strip=True)
-        if cancel_withdraw:
-            continue  # 취소/취하일자가 있으면 신규가 아님
-
-        out.append(
-            {
-                "item_seq": item_seq,
-                "product_name": product_name,
-                "company_name": company_name,
-                "rx_otc": rx_otc,
-                "approval_date": approval_date,
-            }
-        )
-
-    return out
-
-
-def extract_labeled_value(soup: BeautifulSoup, label: str) -> str:
-    """
-    상세 페이지에서 라벨(예: 업체명) 기반으로 값 추출
-    """
-    label_node = soup.find(string=re.compile(rf"^{re.escape(label)}$"))
-    if not label_node:
-        return ""
-
-    th = label_node.find_parent(["th", "dt"])
-    if not th:
-        return ""
-
-    td = th.find_next_sibling(["td", "dd"])
-    if not td:
-        td = th.find_next(["td", "dd"])
-
-    return td.get_text(" ", strip=True) if td else ""
-
-
-def parse_detail_page(item_seq: str):
-    html = http_get(DETAIL_URL, params={"itemSeq": item_seq})
-    soup = BeautifulSoup(html, "lxml")
-
-    product_name = extract_labeled_value(soup, "제품명")
-    company_name = extract_labeled_value(soup, "업체명")
-    cmo_names = extract_labeled_value(soup, "위탁제조업체")
-    rx_otc = extract_labeled_value(soup, "전문/일반")
-    review_type = extract_labeled_value(soup, "허가심사유형")
-    approval_date = extract_labeled_value(soup, "허가일자")
-
-    # 효능효과
-    efficacy_text = ""
-    eff_header = soup.find(string=re.compile(r"효능\s*효과"))
-    if eff_header:
-        container = eff_header.find_parent()
-        if container:
-            block = container.find_next(["div", "table", "td", "dd"])
-            if block:
-                efficacy_text = block.get_text("\n", strip=True)
-
-    # 원료약품 및 분량(성분명만)
-    ingredients = []
-    ing_header = soup.find(string=re.compile(r"원료약품\s*및\s*분량"))
-    if ing_header:
-        table = ing_header.find_parent().find_next("table")
-        if table:
-            for tr in table.find_all("tr")[1:]:
-                tds = tr.find_all("td")
-                if not tds:
-                    continue
-                name = tds[0].get_text(" ", strip=True)
-                if name:
-                    ingredients.append(name)
-
-    ingredients = sorted(set(ingredients))
-    source_url = f"{DETAIL_URL}?itemSeq={item_seq}"
-
-    signature = "|".join(
-        [
-            item_seq,
-            product_name,
-            company_name,
-            cmo_names,
-            rx_otc,
-            review_type,
-            approval_date,
-            efficacy_text,
-            ",".join(ingredients),
-        ]
-    )
-    content_hash = sha256(signature)
-
-    return {
-        "item_seq": item_seq,
-        "product_name": product_name,
-        "company_name": company_name,
-        "cmo_names": cmo_names,
-        "rx_otc": rx_otc,
-        "review_type": review_type,
-        "approval_date": approval_date,
-        "efficacy_text": efficacy_text,
-        "ingredients": ingredients,
-        "source_url": source_url,
-        "content_hash": content_hash,
-    }
-
-
-def upsert_product(conn, data: dict):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO products (
-                item_seq, product_name, company_name, cmo_names, rx_otc,
-                review_type, approval_date, efficacy_text, source_url,
-                content_hash, first_seen_at, last_seen_at, last_updated_at
-            ) VALUES (
-                %(item_seq)s, %(product_name)s, %(company_name)s, %(cmo_names)s, %(rx_otc)s,
-                %(review_type)s, NULLIF(%(approval_date)s,'')::date, %(efficacy_text)s, %(source_url)s,
-                %(content_hash)s, NOW(), NOW(), NOW()
-            )
-            ON CONFLICT (item_seq) DO UPDATE SET
-    
-::contentReference[oaicite:0]{index=0}
+st.dataframe(
+    df,
+    use_container_width=True,
+    hide_index=True
+)
