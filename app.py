@@ -83,3 +83,50 @@ st.dataframe(
     use_container_width=True,
     hide_index=True
 )
+
+import subprocess
+from datetime import datetime
+import time
+
+st.divider()
+st.subheader("🧪 (임시) 수동 수집 테스트")
+
+# [YOU EDIT] 안전장치: 비밀번호 다시 한 번 확인 (운영 중에는 삭제 권장)
+confirm = st.text_input("수동 수집 실행 확인용 비밀번호(다시 입력)", type="password")
+expected = (st.secrets.get("APP_PASSWORD") if "APP_PASSWORD" in st.secrets else os.environ.get("APP_PASSWORD", ""))
+
+if st.button("지금 MFDS 데이터 수집 실행"):
+    if expected and confirm != expected:
+        st.error("비밀번호가 일치하지 않습니다.")
+        st.stop()
+
+    with st.spinner("MFDS 사이트에서 데이터 수집 중... (1~2분 걸릴 수 있어요)"):
+        try:
+            started = datetime.now()
+            result = subprocess.run(
+                ["python", "src/fetch_mfds.py"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            ended = datetime.now()
+
+            st.success(f"수집 완료! ({(ended-started).seconds}초)")
+            if result.stdout.strip():
+                st.code(result.stdout, language="text")
+            if result.stderr.strip():
+                st.warning("stderr 출력이 있어요(참고용).")
+                st.code(result.stderr, language="text")
+
+            st.info("아래 버튼을 눌러 화면 데이터를 새로고침하세요.")
+
+        except subprocess.CalledProcessError as e:
+            st.error("수집 중 오류 발생 ❌")
+            if e.stdout:
+                st.code(e.stdout, language="text")
+            if e.stderr:
+                st.code(e.stderr, language="text")
+
+if st.button("🔄 화면 데이터 새로고침"):
+    st.cache_data.clear()
+    st.experimental_rerun()
