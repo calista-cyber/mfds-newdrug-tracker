@@ -23,6 +23,19 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+      - name: Debug (show branch/sha and file snippet)
+        run: |
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          git rev-parse HEAD
+          echo "=== fetch_mfds.py (lines 170-190) ==="
+          python - << 'PY'
+          from pathlib import Path
+          p = Path("src/fetch_mfds.py")
+          lines = p.read_text(encoding="utf-8").splitlines()
+          for i in range(169, min(190, len(lines))):
+              print(f"{i+1}: {lines[i]}")
+          PY
 
       - name: Run MFDS fetcher
         env:
