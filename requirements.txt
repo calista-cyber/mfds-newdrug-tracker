@@ -1,8 +1,7 @@
-streamlit>=1.32
-pandas>=2.2
 requests
 beautifulsoup4
 lxml
 psycopg[binary]
 python-dotenv
-toml
+pandas
+streamlit
