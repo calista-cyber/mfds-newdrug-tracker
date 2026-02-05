@@ -2,40 +2,46 @@ name: Fetch MFDS New Products
 
 on:
   schedule:
-    # GitHub Actions는 UTC 기준
-    # KST(UTC+9) 금요일 21:00 = UTC 금요일 12:00
+    # GitHub Actions cron is UTC
+    # KST (UTC+9) Fri 21:00  =  UTC Fri 12:00
     - cron: "0 12 * * 5"
   workflow_dispatch: {}
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (force main)
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Show ref/sha (debug)
+        run: |
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          echo "HEAD=$(git rev-parse HEAD)"
+          echo "Branch list:"
+          git branch -a || true
+          echo "=== fetch_mfds.py (first 40 lines) ==="
+          sed -n '1,40p' src/fetch_mfds.py || true
+          echo "=== fetch_mfds.py (around 170-200) ==="
+          nl -ba src/fetch_mfds.py | sed -n '160,210p' || true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
+          python -V
+          pip install -U pip
           pip install -r requirements.txt
-      - name: Debug (show branch/sha and file snippet)
-        run: |
-          echo "GITHUB_REF=$GITHUB_REF"
-          echo "GITHUB_SHA=$GITHUB_SHA"
-          git rev-parse HEAD
-          echo "=== fetch_mfds.py (lines 170-190) ==="
-          python - << 'PY'
-          from pathlib import Path
-          p = Path("src/fetch_mfds.py")
-          lines = p.read_text(encoding="utf-8").splitlines()
-          for i in range(169, min(190, len(lines))):
-              print(f"{i+1}: {lines[i]}")
-          PY
 
       - name: Run MFDS fetcher
         env:
